@@ -38,6 +38,13 @@ initPoints=6
 testPoints=12
 os.makedirs("./graphs", exist_ok=True)
 
+N_high = 250000 #maxcas * maxbch
+N_low = 40000
+
+cost_high = 6.0 #time_high/time_low
+
+normalization_const=1e12
+
 
 # ============================================================
 
@@ -76,7 +83,7 @@ def ObjectiveFunction(x, fidelity='low'):
     if fidelity=='low':
         cost=1
     else:
-        cost=20
+        cost=cost_high
 
     script_path = "./run1D.sh"
     try:
@@ -138,65 +145,137 @@ def EI(mu, std, best_y, xi=0.01):
 
 # =======================================================
 
-X_train = np.linspace(thickness_bounds[0], thickness_bounds[1], initPoints).reshape(-1,1)
-Y_train_list = []
-Err_list = []
+
+# ========================== RESTART ====================
+
+
+def register_after_rest(filepath="output.txt"):
+
+    if not os.path.exists(filepath) : return None, None, None
+
+    X_loaded, Y_loaded, Err_loaded = [], [], []
+    try: 
+        with open(filepath, 'r') as f:
+            header=f.readline()
+            for line in f:
+                parts = line.strip().split()
+                
+                if (len(parts)>=3):
+                    x_val = float(parts[0])
+                    y_val = float(parts[1])
+                    err_rel = float(parts[2])
+
+                    X_loaded.append([x_val])
+                    Y_loaded.append([y_val])
+
+                    std_dev = err_rel * np.abs(y_val)
+                    Err_loaded.append([std_dev**2])
+
+        if len(X_loaded)>0: 
+            return np.array(X_loaded), np.array(Y_loaded), np.array(Err_loaded)
+    except Exception as e:
+        print(f"[ ERROR ] Reading {filepath} failure")
+    
+    return None, None, None
+
+# =======================================================
+
+# ===================== INIT =============================
+print("[ INFO ]: CHECKING RESTART DATA...")
+X_train, Y_train, Noise_Vars_train = register_after_rest("output.txt")
 Colors_list = []
 
-print("[ INFO ]: COMPUTING INIT POINTS...")
+if X_train is not None:
+    print(f"[ INFO ]: # Restart Points = {len(X_train)}")
+    Colors_list = ['blue']*len(X_train)
+else:
+    print(f"[ INFO ]: NO HISTORY TO READ, COMPUTING INIT POINTS")
 
-with open("output.txt", "w") as f:
-    f.write("Thickness_cm\tFlux\t\tError_rel\n")
-
-for x_point in X_train:
-    y_result, var, _ = ObjectiveFunction(x_point, fidelity='low')
-    Y_train_list.append([y_result])
-    Err_list.append([var])
-    Colors_list.append('orange')
-
+    X_train = np.linspace(thickness_bounds[0], thickness_bounds[1], initPoints).reshape(-1,1)
+    Y_train_list = []
+    Err_list = []
 
 
-Y_train=np.array(Y_train_list)
-Noise_Vars_train=np.array(Err_list)
+    with open("output.txt", "w") as f:
+        f.write("Thickness_cm\tFlux\t\tError_rel\n")
+
+    for x_point in X_train:
+        y_result, var,cost = ObjectiveFunction(x_point, fidelity='low')
+        Y_train_list.append([y_result])
+        Err_list.append([var])
+        Colors_list.append('orange')
+
+
+
+    Y_train=np.array(Y_train_list)
+    Noise_Vars_train=np.array(Err_list)
 
 X_grid=np.linspace(thickness_bounds[0], thickness_bounds[1],1000).reshape(-1,1)
+# ========================================================
 
+# ==================== OPTIMALIZATION PROCESS ===================
 print("[ INFO ]: OPTIM START...\n")
 np.random.seed(42)
 
+target_total_points = initPoints + testPoints
+current_points = len(X_train)
+remaining_iterations = max(0, target_total_points - current_points)
 
-for i in range(testPoints):
+for i in range(remaining_iterations):
+    actual_iter = current_points + i - initPoints
+    
 
-    nll_fn = nll_func(X_train, Y_train, Noise_Vars_train)
+    Y_train_sc = Y_train/normalization_const
+    Noise_Vars_train_sc = Noise_Vars_train/(normalization_const**2)
+
+    nll_fn = nll_func(X_train, Y_train_sc, Noise_Vars_train_sc)
 
     res = minimize(nll_fn, [0.2], bounds=[(0.01, 10.0)], method='L-BFGS-B')
     opt_scale_len = res.x[0]
-    mu, std = gaussian_process(X_train, Y_train, Noise_Vars_train, X_grid, opt_scale_len)
+    mu_sc, std_sc = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_grid, opt_scale_len)
+    current_best_y_sc = np.max(Y_train_sc)
     
-    #ucb = UCB(mu,std)
-    #best_idx=np.argmax(ucb)
 
-    current_best_y = np.max(mu)
-    ei=EI(mu,std,current_best_y)
+    #========= FOR MODE SELECTION ==========
+    ei_low = EI(mu_sc, std_sc, current_best_y_sc)
+
+    std_high_sc = std_sc/np.sqrt(N_high/N_low)
+    ei_high=EI(mu_sc,std_high_sc,current_best_y_sc)
+    #=======================================
+
+    ei=ei_low
+    
     best_idx=np.argmax(ei)
 
     next_X= X_grid[best_idx].reshape(-1,1)
+
+    mu = mu_sc*normalization_const
+    std=std_sc*normalization_const
+
     uncertainty_at_next_X=std[best_idx][0]
 
-    expected_relative_error = uncertainty_at_next_X / (np.abs(mu[best_idx][0]) + 1e-9)
+    utility_low = ei_low[best_idx][0]
+    utility_high = ei_high[best_idx][0]/cost_high
+
     
-    if expected_relative_error > 0.015:
-        chosen_fidelity = 'low'
-        marker_color = 'orange'
-    else:
+    
+    if utility_high > utility_low:
         chosen_fidelity = 'high'
         marker_color = 'red'
+    else:
+        chosen_fidelity = 'low'
+        marker_color = 'orange'
 
+
+    next_Y, next_Noise, cost=ObjectiveFunction(next_X, fidelity=chosen_fidelity)
     Colors_list.append(marker_color)
+    X_train=np.vstack([X_train, next_X])
+    Y_train=np.vstack([Y_train, [[next_Y]]])
+    Noise_Vars_train = np.vstack([Noise_Vars_train, [[next_Noise]]])
 
     plt.figure(figsize=(10,5))
     plt.subplot(1, 2, 1)
-    plt.title(f"Iteration {i}  |  scale_len = {opt_scale_len:.8f}")
+    plt.title(f"Iteration {actual_iter}  |  scale_len = {opt_scale_len:.8f}")
     plt.plot(X_grid,mu,'b-', label="mu(x)")
     plt.fill_between(X_grid.flatten(), (mu - 2*std).flatten(), (mu + 2*std).flatten(), alpha=0.2, color='blue', label='uncertainty')
     
@@ -214,15 +293,10 @@ for i in range(testPoints):
     plt.legend()
     
     plt.tight_layout()
-    plt.savefig(f"./graphs/iteration_{i}.png", dpi=300)
+    plt.savefig(f"./graphs/iteration_{actual_iter}.png", dpi=300)
     
-    next_Y, next_Noise, cost=ObjectiveFunction(next_X, fidelity=chosen_fidelity)
 
-    X_train=np.vstack([X_train, next_X])
-    Y_train=np.vstack([Y_train, next_Y])
-    Noise_Vars_train = np.vstack([Noise_Vars_train, next_Noise])
-
-    print(f"Iteration {i}, x= {next_X[0][0]:.3f}, y={next_Y[0][0]:.3f} | fidelity={chosen_fidelity} | uncert = {uncertainty_at_next_X:.3f}")
+   #print(f"Iteration {i}, x= {next_X[0][0]:.3f}, y={next_Y[0][0]:.3f} | fidelity={chosen_fidelity} | uncert = {uncertainty_at_next_X:.3f}")
     plt.close()
 
 best_idx_total = np.argmax(Y_train)
