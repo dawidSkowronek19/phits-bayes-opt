@@ -1,0 +1,9 @@
+
+results/
+graphs/
+
+output.txt
+out.log
+*.out
+*.inp
+
