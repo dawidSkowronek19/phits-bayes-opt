@@ -1,24 +1,27 @@
 # Multi-Fidelity Bayesian Optimization for PHITS
 
-This repository provides a Python-based framework for optimizing target thickness in Monte Carlo simulations using the PHITS (Particle and Heavy Ion Transport code System) code. The system employs Bayesian Optimization coupled with a Multi-Fidelity approach to minimize computational overhead in high-energy physics simulations.
+This repository provides an automated Bayesian Optimization (BO) pipeline designed to optimize target thickness in PHITS (Particle and Heavy Ion Transport code System) simulations. The goal is to maximize particle flux while efficiently managing computational resources.
 
-## Core Capabilities
+## Overview
 
-* **Multi-Fidelity Strategy:** Dynamically selects simulation fidelity (particle count) based on the predicted relative error derived from the Gaussian Process variance. If the predicted uncertainty exceeds 1.5%, a low-fidelity simulation is executed. Otherwise, a high-fidelity simulation is triggered for precise exploitation.
-* **Kernel Specification:** Utilizes the Matérn 5/2 kernel, which is mathematically suited for modeling non-linear physical responses and local discontinuities in particle transport.
-* **Acquisition Function:** Implements Expected Improvement (EI) to balance exploration of the parameter space with the exploitation of known optimal regions.
-* **Automated Execution & Parsing:** Interfaces with PHITS via a bash wrapper (`run1D.sh`), autonomously executing the simulation, waiting for completion, and parsing the standard output files to extract particle flux and statistical errors.
-* **Headless Server Support:** Implements the `Agg` backend in `matplotlib` for generating optimization graphs on headless Linux compute nodes without an X11 display.
+The core logic is driven by a Python-based optimizer (`Optim_BO.py`). It uses a Gaussian Process (GP) surrogate model to approximate the simulation results and an Expected Improvement (EI) acquisition function to sequentially select the best target thickness to evaluate next.
+
+## Key Features (Python Optimizer)
+
+* **Multi-Fidelity Approach:** The script dynamically chooses between `low` and `high` fidelity simulation modes. It evaluates the utility-to-cost ratio, allowing it to explore the parameter space cheaply and only run expensive, high-accuracy simulations when it is mathematically justified.
+* **Gaussian Process Regression:** Handles noisy simulation outputs, calculating mean predictions and plotting uncertainty bounds across the target thickness domain.
+* **State Persistence (Auto-Restart):** The script automatically reads `output.txt` upon startup. If a run is interrupted, it will seamlessly resume from the last evaluated point without wasting computation time.
+* **Automated Visualization:** At every iteration, it generates and saves plots in the `./graphs/` directory. These graphs visualize the current GP model, uncertainty areas, and the state of the acquisition function.
 
 ## Prerequisites
 
-* **Python 3.x**
-* Required packages: `numpy`, `scipy`, `matplotlib`
-* **PHITS** simulation environment installed and configured in the system path.
-* Linux environment.
+* Python 3.x
+* Required Python packages: `numpy`, `scipy`, `matplotlib`
+* PHITS executable (`phits_LinGfort_OMP`) available in your environment.
 
 ## Usage
 
-1. **Permissions:** Ensure the bash wrapper script is executable.
+1. Ensure your Bash wrapper script is named `run1D.sh` (or update the filename directly in the Python script) and that it accepts two arguments: `[thickness]` and `[fidelity]`.
+2. Start the optimization process:
    ```bash
-   chmod +x run1D.sh
+   python Optim_BO.py
