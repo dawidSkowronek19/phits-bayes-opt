@@ -41,7 +41,7 @@ os.makedirs("./graphs", exist_ok=True)
 N_high = 250000 #maxcas * maxbch
 N_low = 40000
 
-cost_high = 6.0 #time_high/time_low
+threshold_distance=0.05
 
 normalization_const=1e12
 
@@ -79,18 +79,13 @@ def ObjectiveFunction(x, fidelity='low'):
     target_thickness_str = f"{target_thickness:.4f}"
 
     print(f"-> PHITS START: THICKNESS = {target_thickness_str} cm | MODE = {fidelity}")
-    
-    if fidelity=='low':
-        cost=1
-    else:
-        cost=cost_high
 
     script_path = "./run1D.sh"
     try:
         subprocess.run([script_path, target_thickness_str, fidelity], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         print(f"[ ERROR ]:\n{e.stderr}")
-        return 0.0, 1e6, cost
+        return 0.0, 1e6
     
     workdir = f"./results/{targetName}_{target_thickness_str}"
     
@@ -102,7 +97,7 @@ def ObjectiveFunction(x, fidelity='low'):
     std_dev = y_err * np.abs(y_result)
     variance = std_dev**2
 
-    return y_result, variance, cost
+    return y_result, variance
 # ===========================================================
 
 # ====================== BAYES OPTIM ========================
@@ -200,7 +195,7 @@ else:
         f.write("Thickness_cm\tFlux\t\tError_rel\n")
 
     for x_point in X_train:
-        y_result, var,cost = ObjectiveFunction(x_point, fidelity='low')
+        y_result, var = ObjectiveFunction(x_point, fidelity='low')
         Y_train_list.append([y_result])
         Err_list.append([var])
         Colors_list.append('orange')
@@ -233,33 +228,28 @@ for i in range(remaining_iterations):
     res = minimize(nll_fn, [0.2], bounds=[(0.01, 10.0)], method='L-BFGS-B')
     opt_scale_len = res.x[0]
     mu_sc, std_sc = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_grid, opt_scale_len)
-    current_best_y_sc = np.max(Y_train_sc)
+
+    mu_train_sc, _ = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_train, opt_scale_len)
+    current_best_y_sc = np.max(mu_train_sc)
     
 
     #========= FOR MODE SELECTION ==========
-    ei_low = EI(mu_sc, std_sc, current_best_y_sc)
-
-    std_high_sc = std_sc/np.sqrt(N_high/N_low)
-    ei_high=EI(mu_sc,std_high_sc,current_best_y_sc)
-    #=======================================
-
-    ei=ei_low
-    
+    ei = EI(mu_sc, std_sc, current_best_y_sc)
     best_idx=np.argmax(ei)
+    next_X=X_grid[best_idx].reshape(-1,1)
 
-    next_X= X_grid[best_idx].reshape(-1,1)
-
-    mu = mu_sc*normalization_const
+    mu=mu_sc*normalization_const
     std=std_sc*normalization_const
+    uncertainty_at_next_X = std[best_idx][0]
 
-    uncertainty_at_next_X=std[best_idx][0]
+    dist_to_closestX = np.min(np.abs(X_train-next_X))
+    
 
-    utility_low = ei_low[best_idx][0]
-    utility_high = ei_high[best_idx][0]/cost_high
+
 
     
     
-    if utility_high > utility_low:
+    if dist_to_closestX <threshold_distance:
         chosen_fidelity = 'high'
         marker_color = 'red'
     else:
@@ -267,7 +257,7 @@ for i in range(remaining_iterations):
         marker_color = 'orange'
 
 
-    next_Y, next_Noise, cost=ObjectiveFunction(next_X, fidelity=chosen_fidelity)
+    next_Y, next_Noise=ObjectiveFunction(next_X, fidelity=chosen_fidelity)
     Colors_list.append(marker_color)
     X_train=np.vstack([X_train, next_X])
     Y_train=np.vstack([Y_train, [[next_Y]]])
