@@ -6,6 +6,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 from scipy.stats import norm
+from scipy.linalg import cholesky, cho_solve, solve_triangular
 # =================== SCALE LEN FUNCTION ===================
 def nll_func(X_train, Y_train, Noise_Vars_train):
     Y_mean = np.mean(Y_train)
@@ -14,15 +15,18 @@ def nll_func(X_train, Y_train, Noise_Vars_train):
     
     def nll(theta):
         length_scale = theta[0]
+        signal_var = theta[1]
         K = cov(X_train,X_train, length_scale) + np.diag(Noise_Vars_train.flatten())
 
-        sign, logdet = np.linalg.slogdet(K)
-        if sign<=0: return np.inf
+        try:
+            L=cholesky(K, lower=True)
+        except np.linalg.LinAlgError:
+            return np.inf
 
-        K_inv = np.linalg.inv(K)
+        alpha = cho_solve((L, True), Y_centered)
 
-        data_fit=0.5*Y_centered.T.dot(K_inv).dot(Y_centered)[0,0]
-        complexity = 0.5*logdet
+        data_fit=0.5*Y_centered.T.dot(alpha)[0,0]
+        complexity = 0.5*np.sum(np.logd(np.diag(L)))
         constant =0.5*len(X_train)*np.log(2*np.pi)
 
         return data_fit+complexity+constant
@@ -101,27 +105,35 @@ def ObjectiveFunction(x, fidelity='low'):
 # ===========================================================
 
 # ====================== BAYES OPTIM ========================
-def cov(x1, x2, scale_len):
+def cov(x1, x2, scale_len, signal_var):
     d=np.abs(x1-x2.T)/scale_len
     sqrt5_d = np.sqrt(5)*d
 
-    return (1.0+sqrt5_d+(5.0/3.0)*d**2)*np.exp(-sqrt5_d)
+    return signal_var*(1.0+sqrt5_d+(5.0/3.0)*d**2)*np.exp(-sqrt5_d)
 
-def gaussian_process(X_train, Y_train, Noise_Vars_train, X_test, scale_len):
+def gaussian_process(X_train, Y_train, Noise_Vars_train, X_test, scale_len, signal_var):
     Y_mean = np.mean(Y_train)
     Y_centered = Y_train - Y_mean
     
-    K = cov(X_train, X_train, scale_len)+np.diag(Noise_Vars_train.flatten())
+    K = cov(X_train, X_train, scale_len, signal_var)+np.diag(Noise_Vars_train.flatten())
 
-    K_s=cov(X_train, X_test, scale_len)
-    K_ss=cov(X_test,X_test, scale_len)
+    K_s=cov(X_train, X_test, scale_len, signal_var)
+    K_ss=cov(X_test,X_test, scale_len, signal_var)
 
-    K_inv = np.linalg.inv(K)
+    try:
+        L=cholesky(K, lower=True)
+    except np.linalg.LinAlgError:
+        L=cholesky(K+np.eye(len(K)*1e-6, lower=True))
+    
+    alpha=cho_solve((L,True), Y_centered)
+    mu_TEST = K_s.T.dot(alpha)+Y_mean
+    v = solve_triangular(L, K_s, lower=True)
+    cov_TEST= K_ss-v.T.dot(v)
 
-    mu_TEST = K_s.T.dot(K_inv).dot(Y_centered) + Y_mean
-    cov_TEST = K_ss - K_s.T.dot(K_inv).dot(K_s)
+    var_TEST = np.diag(cov_TEST)
+    var_TEST=np.maximum(var_TEST,1e-9)
 
-    return mu_TEST, np.sqrt(np.diag(cov_TEST).reshape(-1,1))
+    return mu_TEST, np.sqrt(var_TEST).reshape(-1,1)
 
 def UCB(mu, std, kappa=2.0):
     return mu +kappa*std
@@ -225,11 +237,13 @@ for i in range(remaining_iterations):
 
     nll_fn = nll_func(X_train, Y_train_sc, Noise_Vars_train_sc)
 
-    res = minimize(nll_fn, [0.2], bounds=[(0.01, 10.0)], method='L-BFGS-B')
+    res = minimize(nll_fn, [0.2, 1.0], bounds=[(0.01, 10.0), (1e-3, 10.0)], method='L-BFGS-B')
     opt_scale_len = res.x[0]
-    mu_sc, std_sc = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_grid, opt_scale_len)
+    opt_signal_var=res.x[1]
 
-    mu_train_sc, _ = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_train, opt_scale_len)
+    mu_sc, std_sc = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_grid, opt_scale_len, opt_signal_var)
+    mu_train_sc, _ = gaussian_process(X_train, Y_train_sc, Noise_Vars_train_sc, X_train, opt_scale_len, opt_signal_var)
+    
     current_best_y_sc = np.max(mu_train_sc)
     
 
@@ -241,15 +255,15 @@ for i in range(remaining_iterations):
     mu=mu_sc*normalization_const
     std=std_sc*normalization_const
     uncertainty_at_next_X = std[best_idx][0]
+    expected_y_sc = mu_sc[best_idx][0]
 
-    dist_to_closestX = np.min(np.abs(X_train-next_X))
+    av_low_noise_std = np.sqrt(np.median(Noise_Vars_train_sc))
+
+    model_Confident = uncertainty_at_next_X<av_low_noise_std
+    promising_Reg = expected_y_sc>(current_best_y_sc - av_low_noise_std)
+
     
-
-
-
-    
-    
-    if dist_to_closestX <threshold_distance:
+    if model_Confident and promising_Reg:
         chosen_fidelity = 'high'
         marker_color = 'red'
     else:
@@ -265,7 +279,7 @@ for i in range(remaining_iterations):
 
     plt.figure(figsize=(10,5))
     plt.subplot(1, 2, 1)
-    plt.title(f"Iteration {actual_iter}  |  scale_len = {opt_scale_len:.8f}")
+    plt.title(f"Iteration {actual_iter}  |  sc_len = {opt_scale_len:.8f} | var = {opt_signal_var}")
     plt.plot(X_grid,mu,'b-', label="mu(x)")
     plt.fill_between(X_grid.flatten(), (mu - 2*std).flatten(), (mu + 2*std).flatten(), alpha=0.2, color='blue', label='uncertainty')
     
