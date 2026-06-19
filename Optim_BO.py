@@ -16,7 +16,7 @@ def nll_func(X_train, Y_train, Noise_Vars_train):
     def nll(theta):
         length_scale = theta[0]
         signal_var = theta[1]
-        K = cov(X_train,X_train, length_scale) + np.diag(Noise_Vars_train.flatten())
+        K = cov(X_train,X_train, length_scale, signal_var) + np.diag(Noise_Vars_train.flatten())
 
         try:
             L=cholesky(K, lower=True)
@@ -26,7 +26,7 @@ def nll_func(X_train, Y_train, Noise_Vars_train):
         alpha = cho_solve((L, True), Y_centered)
 
         data_fit=0.5*Y_centered.T.dot(alpha)[0,0]
-        complexity = 0.5*np.sum(np.logd(np.diag(L)))
+        complexity = np.sum(np.log(np.diag(L)))
         constant =0.5*len(X_train)*np.log(2*np.pi)
 
         return data_fit+complexity+constant
@@ -123,7 +123,7 @@ def gaussian_process(X_train, Y_train, Noise_Vars_train, X_test, scale_len, sign
     try:
         L=cholesky(K, lower=True)
     except np.linalg.LinAlgError:
-        L=cholesky(K+np.eye(len(K)*1e-6, lower=True))
+        L=cholesky(K+np.eye(len(K))*1e-6, lower=True)
     
     alpha=cho_solve((L,True), Y_centered)
     mu_TEST = K_s.T.dot(alpha)+Y_mean
@@ -142,7 +142,7 @@ def EI(mu, std, best_y, xi=0.01):
     Z = np.zeros_like(mu)
     ei = np.zeros_like(mu)
 
-    mask = std>0
+    mask = std>1e-9
 
     if np.any(mask):
         Z[mask]=(mu[mask]-best_y-xi)/std[mask]
@@ -305,3 +305,51 @@ for i in range(remaining_iterations):
 
 best_idx_total = np.argmax(Y_train)
 print(f"x_max = {X_train[best_idx_total][0]:.3f}, y_max = {Y_train[best_idx_total][0]:.3f}")
+
+print("\n[ INFO ] SAVING DATA")
+
+Y_train_sc_final = Y_train / normalization_const
+Noise_Vars_train_sc_final = Noise_Vars_train / normalization_const**2
+
+nll_fn_final = nll_func(X_train, Y_train_sc_final, Noise_Vars_train_sc_final)
+res_final = minimize(nll_fn_final, [0.2, 1.0], bounds=[(0.01, 10.0), (1e-3, 10.0)], method = 'L-BFGS-B')
+
+opt_scale_len_final = res_final.x[0]
+opt_signal_var_final = res_final.x[1]
+
+mu_sc_final, std_sc_final = gaussian_process(X_train, Y_train_sc_final, Noise_Vars_train_sc_final, 
+                                             X_grid, opt_scale_len_final, opt_signal_var_final)
+
+mu_final = mu_sc_final *normalization_const
+std_final = std_sc_final *normalization_const
+var_final = std_final**2
+
+unit = r"$\frac{1}{\mathrm{cm}^2 \cdot \mathrm{s} \cdot \mathrm{mA}}$"
+final_data_file ="./final_prediction.txt"
+with open(final_data_file, "w") as f:
+    f.write("Thickness_cm\tmu(x)\tvar(x)\tstd_dev(x)\n")
+    for idx, x_val in enumerate(X_grid.flatten()):
+        f.write(f"{x_val}\t{mu_final[idx][0]:.4e}\t{var_final[idx][0]:.4e}\t{std_final[idx][0]:.4e}\n")
+print("[ INFO ]: FILE SAVED")
+
+plt.figure(figsize=(10,6))
+plt.title(f"op_len = {opt_scale_len_final:.4f} | op_var = {opt_signal_var_final:.4f}")
+plt.plot(X_grid, mu_final, 'b-', label=r"${{\mu(x)}}$")
+plt.fill_between(X_grid.flatten(), (mu_final.flatten()-2*std_final.flatten()), (mu_final.flatten()+2*std_final.flatten()), alpha=0.2, color='blue', label='uncertainty')
+for j in range(len(X_train)):
+    lbl = 'Test values' if j == 0 else None
+    plt.errorbar(X_train[j][0], Y_train[j][0], yerr=np.sqrt(Noise_Vars_train[j][0]), fmt='o', color=Colors_list[j], label=lbl)
+
+plt.axvline(X_train[best_idx_total][0], color='green', linestyle='--', label=f'x_max = {X_train[best_idx_total][0]:.4f}, y_max = {Y_train[best_idx_total][0]:.4e}')
+
+
+
+plt.xlabel("Thickness [cm]")
+plt.ylabel(f"Flux [{unit}]")
+plt.legend(loc="lower left", fontsize='small')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.tight_layout()
+
+plt.savefig("./graphs/final_model.png", dpi=300)
+plt.close()
+print("[ INFO ]: WORK DONE")
