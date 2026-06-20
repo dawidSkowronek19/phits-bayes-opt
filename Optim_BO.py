@@ -254,13 +254,15 @@ for i in range(remaining_iterations):
 
     mu=mu_sc*normalization_const
     std=std_sc*normalization_const
-    uncertainty_at_next_X = std[best_idx][0]
+    uncertainty_at_next_X = std_sc[best_idx][0]
     expected_y_sc = mu_sc[best_idx][0]
 
     av_low_noise_std = np.sqrt(np.median(Noise_Vars_train_sc))
 
     model_Confident = uncertainty_at_next_X<av_low_noise_std
     promising_Reg = expected_y_sc>(current_best_y_sc - av_low_noise_std)
+
+    print(f"Confident = {model_Confident} | promising_Reg = {promising_Reg}")
 
     
     if model_Confident and promising_Reg:
